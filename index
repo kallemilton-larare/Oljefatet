@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>2D Lasersimulering - Snells Lag</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #ffffff; touch-action: none; }
+        canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+    </style>
+</head>
+<body class="flex flex-col h-screen text-gray-900 font-sans">
+ 
+    <div class="relative z-10 flex flex-col sm:flex-row items-center justify-between p-4 bg-gray-100 shadow-md border-b border-gray-300 gap-4">
+        <div>
+            <h1 class="text-xl font-bold text-gray-800">Lasersimulering: Optik & Brytning</h1>
+            <p class="text-xs text-gray-500 mt-1">Dra i lasern eller måttbandet. Klicka för att sikta.</p>
+        </div>
+       
+        <div class="flex items-center gap-4 w-full sm:w-auto flex-wrap justify-end">
+            <button id="toggleInfoBtn" class="px-4 py-2 bg-purple-600 hover:bg-purple-500 active:bg-purple-700 text-white font-semibold rounded-lg shadow-md transition-colors whitespace-nowrap">
+                Dölj uppgift
+            </button>
+            <button id="materialBtn" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white font-semibold rounded-lg shadow-md transition-colors whitespace-nowrap">
+                Skikt: Olja
+            </button>
+            <button id="addTapeBtn" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-semibold rounded-lg shadow-md transition-colors whitespace-nowrap">
+                + Måttband
+            </button>
+            <button id="toggleBtn" class="px-5 py-2 bg-red-600 hover:bg-red-500 active:bg-red-700 text-white font-semibold rounded-lg shadow-md transition-colors whitespace-nowrap">
+                Stäng av
+            </button>
+        </div>
+    </div>
+ 
+    <div class="flex-1 relative w-full h-full overflow-hidden" id="canvasContainer">
+       
+        <div id="infoBox" class="absolute top-4 right-4 bg-white/80 px-6 py-3 rounded-lg shadow-md border border-gray-200 pointer-events-none text-right z-20 transition-opacity duration-300">
+            <h2 class="text-base font-bold text-gray-800">Uppgift: Bestäm brytningsindexet för oljan!</h2>
+            <p class="text-sm font-medium text-gray-600 mt-1">Runtomkring skiktet är det luft (n = 1.00)</p>
+        </div>
+
+        <canvas id="simCanvas"></canvas>
+        <div id="trashZone" class="absolute bottom-6 right-6 w-16 h-16 bg-gray-200 rounded-full flex items-center justify-center text-3xl shadow-lg border-2 border-gray-400 opacity-0 pointer-events-none transition-all duration-200 z-20">
+            🗑️
+        </div>
+    </div>
+ 
+    <script>
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+        const container = document.getElementById('canvasContainer');
+       
+        const toggleBtn = document.getElementById('toggleBtn');
+        const addTapeBtn = document.getElementById('addTapeBtn');
+        const materialBtn = document.getElementById('materialBtn');
+        const toggleInfoBtn = document.getElementById('toggleInfoBtn');
+        const infoBox = document.getElementById('infoBox');
+        const trashZone = document.getElementById('trashZone');
+ 
+        let width = 0;
+        let height = 0;
+        let infoVisible = true;
+ 
+        const laser = {
+            x: 0,
+            y: 0,
+            length: 80,
+            thickness: 14,
+            angle: 0,
+            isOn: true,
+            color: '#ef4444' // Röd
+        };
+ 
+        const horizontalLayer = {
+            y: 0,
+            height: 80,
+            n_outside: 1.0, // Luft
+            n_inside: 1.42  // Olja
+        };
+ 
+        const screenObj = {
+            y: 0,
+            height: 60
+        };
+ 
+        const rectangleMaterials = [
+            { name: 'Olja', n: 1.42, fill: 'rgba(254, 240, 138, 0.3)', stroke: 'rgba(234, 179, 8, 0.8)' },
+            { name: 'Luft', n: 1.00, fill: 'rgba(243, 244, 246, 0.4)', stroke: 'rgba(156, 163, 175, 0.8)' }
+        ];
+        let currentMaterialIndex = 0;
+ 
+        let tapeMeasures = [];
+ 
+        let draggingObject = null;
+        let dragOffsetX = 0;
+        let dragOffsetY = 0;
+        let hoverTrash = false;
+ 
+        function resize() {
+            width = container.clientWidth;
+            height = container.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+           
+            screenObj.y = height - screenObj.height;
+ 
+            if (laser.x === 0 && laser.y === 0) {
+                laser.x = width * 0.5;
+                laser.y = height * 0.25;
+                laser.angle = Math.PI / 2 - 0.2;
+               
+                horizontalLayer.y = screenObj.y - horizontalLayer.height - 40;
+ 
+                tapeMeasures.push({
+                    baseX: width / 2 - 50,
+                    baseY: horizontalLayer.y + 40,
+                    tipX: width / 2 + 50,
+                    tipY: horizontalLayer.y + 40
+                });
+            }
+        }
+        window.addEventListener('resize', resize);
+        resize();
+ 
+        // --- UI Händelsehanterare ---
+       
+        toggleInfoBtn.addEventListener('click', () => {
+            infoVisible = !infoVisible;
+            if (infoVisible) {
+                infoBox.classList.remove('opacity-0');
+                toggleInfoBtn.textContent = 'Dölj uppgift';
+                toggleInfoBtn.classList.replace('bg-green-600', 'bg-purple-600');
+                toggleInfoBtn.classList.replace('hover:bg-green-500', 'hover:bg-purple-500');
+                toggleInfoBtn.classList.replace('active:bg-green-700', 'active:bg-purple-700');
+            } else {
+                infoBox.classList.add('opacity-0');
+                toggleInfoBtn.textContent = 'Visa uppgift';
+                toggleInfoBtn.classList.replace('bg-purple-600', 'bg-green-600');
+                toggleInfoBtn.classList.replace('hover:bg-purple-500', 'hover:bg-green-500');
+                toggleInfoBtn.classList.replace('active:bg-purple-700', 'active:bg-green-700');
+            }
+        });
+
+        toggleBtn.addEventListener('click', () => {
+            laser.isOn = !laser.isOn;
+            if (laser.isOn) {
+                toggleBtn.textContent = 'Stäng av';
+                toggleBtn.classList.replace('bg-green-600', 'bg-red-600');
+                toggleBtn.classList.replace('hover:bg-green-500', 'hover:bg-red-500');
+                toggleBtn.classList.replace('active:bg-green-700', 'active:bg-red-700');
+            } else {
+                toggleBtn.textContent = 'Sätt på';
+                toggleBtn.classList.replace('bg-red-600', 'bg-green-600');
+                toggleBtn.classList.replace('hover:bg-red-500', 'hover:bg-green-500');
+                toggleBtn.classList.replace('active:bg-red-700', 'active:bg-green-700');
+            }
+        });
+ 
+        materialBtn.addEventListener('click', () => {
+            currentMaterialIndex = (currentMaterialIndex + 1) % rectangleMaterials.length;
+            const mat = rectangleMaterials[currentMaterialIndex];
+            horizontalLayer.n_inside = mat.n;
+            materialBtn.textContent = `Skikt: ${mat.name}`;
+        });
+ 
+        addTapeBtn.addEventListener('click', () => {
+            tapeMeasures.push({
+                baseX: width / 2 - 50,
+                baseY: horizontalLayer.y + 40,
+                tipX: width / 2 + 50,
+                tipY: horizontalLayer.y + 40
+            });
+        });
+ 
+        // --- Hjälpfunktioner ---
+        function getMousePos(e) {
+            const rect = canvas.getBoundingClientRect();
+            let clientX = e.touches && e.touches.length > 0 ? e.touches[0].clientX : e.clientX;
+            let clientY = e.touches && e.touches.length > 0 ? e.touches[0].clientY : e.clientY;
+            return { x: clientX - rect.left, y: clientY - rect.top };
+        }
+ 
+        function isPointInCircle(px, py, cx, cy, radius) {
+            const dx = px - cx;
+            const dy = py - cy;
+            return dx * dx + dy * dy <= radius * radius;
+        }
+ 
+        function checkTrashHover(x, y) {
+            const rect = trashZone.getBoundingClientRect();
+            if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+                if (!hoverTrash) {
+                    trashZone.classList.add('bg-red-200', 'border-red-500', 'scale-110');
+                    trashZone.classList.remove('bg-gray-200', 'border-gray-400');
+                    hoverTrash = true;
+                }
+            } else {
+                if (hoverTrash) {
+                    trashZone.classList.remove('bg-red-200', 'border-red-500', 'scale-110');
+                    trashZone.classList.add('bg-gray-200', 'border-gray-400');
+                    hoverTrash = false;
+                }
+            }
+        }
+ 
+        function handlePointerDown(e) {
+            const pos = getMousePos(e);
+ 
+            for (let i = tapeMeasures.length - 1; i >= 0; i--) {
+                const tm = tapeMeasures[i];
+                if (isPointInCircle(pos.x, pos.y, tm.tipX, tm.tipY, 15)) {
+                    draggingObject = { type: 'tapeTip', index: i };
+                    dragOffsetX = pos.x - tm.tipX;
+                    dragOffsetY = pos.y - tm.tipY;
+                    trashZone.classList.remove('opacity-0');
+                    trashZone.classList.add('opacity-100');
+                    return;
+                }
+                if (isPointInCircle(pos.x, pos.y, tm.baseX, tm.baseY, 15)) {
+                    draggingObject = { type: 'tapeBase', index: i };
+                    dragOffsetX = pos.x - tm.baseX;
+                    dragOffsetY = pos.y - tm.baseY;
+                    trashZone.classList.remove('opacity-0');
+                    trashZone.classList.add('opacity-100');
+                    return;
+                }
+            }
+ 
+            const midX = laser.x - Math.cos(laser.angle) * (laser.length / 2);
+            const midY = laser.y - Math.sin(laser.angle) * (laser.length / 2);
+            if (isPointInCircle(pos.x, pos.y, midX, midY, laser.length / 2 + 10)) {
+                draggingObject = { type: 'laser' };
+                dragOffsetX = pos.x - laser.x;
+                dragOffsetY = pos.y - laser.y;
+                return;
+            }
+ 
+            rotateLaserTowards(pos.x, pos.y);
+            draggingObject = { type: 'aim' };
+        }
+ 
+        function handlePointerMove(e) {
+            if (!draggingObject) return;
+            e.preventDefault();
+            const pos = getMousePos(e);
+            let clientX = e.touches && e.touches.length > 0 ? e.touches[0].clientX : e.clientX;
+            let clientY = e.touches && e.touches.length > 0 ? e.touches[0].clientY : e.clientY;
+ 
+            if (draggingObject.type === 'laser') {
+                let newY = pos.y - dragOffsetY;
+                if (newY > horizontalLayer.y - 15) newY = horizontalLayer.y - 15;
+                laser.x = pos.x - dragOffsetX;
+                laser.y = newY;
+            } else if (draggingObject.type === 'tapeTip') {
+                let newTipY = pos.y - dragOffsetY;
+                if (newTipY < horizontalLayer.y) newTipY = horizontalLayer.y;
+                tapeMeasures[draggingObject.index].tipX = pos.x - dragOffsetX;
+                tapeMeasures[draggingObject.index].tipY = newTipY;
+                checkTrashHover(clientX, clientY);
+            } else if (draggingObject.type === 'tapeBase') {
+                const tm = tapeMeasures[draggingObject.index];
+                const newX = pos.x - dragOffsetX;
+                let newY = pos.y - dragOffsetY;
+               
+                let dy = newY - tm.baseY;
+                if (tm.baseY + dy < horizontalLayer.y) dy = horizontalLayer.y - tm.baseY;
+                if (tm.tipY + dy < horizontalLayer.y) dy = horizontalLayer.y - tm.tipY;
+ 
+                const dx = newX - tm.baseX;
+               
+                tm.baseX += dx;
+                tm.baseY += dy;
+                tm.tipX += dx;
+                tm.tipY += dy;
+                checkTrashHover(clientX, clientY);
+            } else if (draggingObject.type === 'aim') {
+                rotateLaserTowards(pos.x, pos.y);
+            }
+        }
+ 
+        function handlePointerUp() {
+            if (!draggingObject) return;
+            if (draggingObject.type === 'tapeTip' || draggingObject.type === 'tapeBase') {
+                if (hoverTrash) {
+                    tapeMeasures.splice(draggingObject.index, 1);
+                }
+                trashZone.classList.add('opacity-0');
+                trashZone.classList.remove('opacity-100', 'bg-red-200', 'border-red-500', 'scale-110');
+                trashZone.classList.add('bg-gray-200', 'border-gray-400');
+                hoverTrash = false;
+            }
+            draggingObject = null;
+        }
+ 
+        function rotateLaserTowards(tx, ty) {
+            const dx = tx - laser.x;
+            const dy = ty - laser.y;
+            laser.angle = Math.atan2(dy, dx);
+        }
+ 
+        canvas.addEventListener('mousedown', handlePointerDown);
+        window.addEventListener('mousemove', handlePointerMove);
+        window.addEventListener('mouseup', handlePointerUp);
+        canvas.addEventListener('touchstart', handlePointerDown, { passive: false });
+        window.addEventListener('touchmove', handlePointerMove, { passive: false });
+        window.addEventListener('touchend', handlePointerUp);
+ 
+        // --- Fysik: Strålspårning ---
+        function calculateRefraction(dir, normal, n_outside, n_inside) {
+            let dot = dir.x * normal.x + dir.y * normal.y;
+            let N = { x: normal.x, y: normal.y };
+            let n1, n2;
+ 
+            if (dot < 0) {
+                n1 = n_outside;
+                n2 = n_inside;
+                dot = -dot;
+            } else {
+                n1 = n_inside;
+                n2 = n_outside;
+                N = { x: -normal.x, y: -normal.y };
+            }
+ 
+            const eta = n1 / n2;
+            const k = 1.0 - eta * eta * (1.0 - dot * dot);
+ 
+            if (k < 0) {
+                return {
+                    x: dir.x - 2.0 * (dir.x * N.x + dir.y * N.y) * N.x,
+                    y: dir.y - 2.0 * (dir.x * N.x + dir.y * N.y) * N.y
+                };
+            } else {
+                const coeff = eta * dot - Math.sqrt(k);
+                return {
+                    x: eta * dir.x + coeff * N.x,
+                    y: eta * dir.y + coeff * N.y
+                };
+            }
+        }
+ 
+        function getIntersection(origin, dir, segmentA, segmentB) {
+            const r_px = origin.x, r_py = origin.y;
+            const r_dx = dir.x, r_dy = dir.y;
+            const s_px = segmentA.x, s_py = segmentA.y;
+            const s_dx = segmentB.x - segmentA.x;
+            const s_dy = segmentB.y - segmentA.y;
+ 
+            const T2 = r_dx * s_dy - r_dy * s_dx;
+            if (T2 === 0) return null;
+ 
+            const T1 = (s_px - r_px) * s_dy - (s_py - r_py) * s_dx;
+            const t = T1 / T2;
+            const u = ((s_px - r_px) * r_dy - (s_py - r_py) * r_dx) / T2;
+ 
+            if (t > 0 && u >= 0 && u <= 1) {
+                return { x: r_px + r_dx * t, y: r_py + r_dy * t, distance: t };
+            }
+            return null;
+        }
+ 
+        function getSegments() {
+            const segments = [];
+           
+            segments.push({ a: {x:0, y:0}, b: {x:width, y:0}, type: 'bounds' });
+            segments.push({ a: {x:width, y:0}, b: {x:width, y:height}, type: 'bounds' });
+            segments.push({ a: {x:0, y:height}, b: {x:0, y:0}, type: 'bounds' });
+           
+            segments.push({ a: {x:0, y:screenObj.y}, b: {x:width, y:screenObj.y}, type: 'screen' });
+ 
+            const hl = horizontalLayer;
+            segments.push({ a: {x:0, y:hl.y}, b: {x:width, y:hl.y}, type: 'glass', normal: {x:0, y:-1} });
+            segments.push({ a: {x:width, y:hl.y+hl.height}, b: {x:0, y:hl.y+hl.height}, type: 'glass', normal: {x:0, y:1} });
+ 
+            return segments;
+        }
+ 
+        function calculateRayPath() {
+            const path = [];
+            const segments = getSegments();
+           
+            let currentPos = { x: laser.x, y: laser.y };
+            let currentDir = { x: Math.cos(laser.angle), y: Math.sin(laser.angle) };
+           
+            for (let bounce = 0; bounce < 20; bounce++) {
+                let closestHit = null;
+                let minDistance = Infinity;
+ 
+                for (const seg of segments) {
+                    const hit = getIntersection(currentPos, currentDir, seg.a, seg.b);
+                    if (hit && hit.distance > 0.001 && hit.distance < minDistance) {
+                        minDistance = hit.distance;
+                        closestHit = { ...hit, segment: seg };
+                    }
+                }
+ 
+                if (!closestHit) break;
+                path.push({ start: currentPos, end: closestHit, segment: closestHit.segment });
+ 
+                if (closestHit.segment.type === 'bounds' || closestHit.segment.type === 'screen') {
+                    break;
+                }
+                else if (closestHit.segment.type === 'glass') {
+                    const newDir = calculateRefraction(currentDir, closestHit.segment.normal, horizontalLayer.n_outside, horizontalLayer.n_inside);
+                    currentDir = newDir;
+                    currentPos = closestHit;
+                }
+            }
+            return path;
+        }
+ 
+        // --- Rendering ---
+ 
+        function drawStarShape(ctx, cx, cy, spikes, outerRadius, innerRadius) {
+            let rot = Math.PI / 2 * 3;
+            let x = cx;
+            let y = cy;
+            let step = Math.PI / spikes;
+
+            ctx.beginPath();
+            ctx.moveTo(cx, cy - outerRadius);
+            for (let i = 0; i < spikes; i++) {
+                x = cx + Math.cos(rot) * outerRadius;
+                y = cy + Math.sin(rot) * outerRadius;
+                ctx.lineTo(x, y);
+                rot += step;
+
+                x = cx + Math.cos(rot) * innerRadius;
+                y = cy + Math.sin(rot) * innerRadius;
+                ctx.lineTo(x, y);
+                rot += step;
+            }
+            ctx.lineTo(cx, cy - outerRadius);
+            ctx.closePath();
+        }
+
+        function drawTapeMeasures() {
+            for (const tm of tapeMeasures) {
+                const dx = tm.tipX - tm.baseX;
+                const dy = tm.tipY - tm.baseY;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                const angle = Math.atan2(dy, dx);
+ 
+                // Rita ut själva linjen
+                ctx.beginPath();
+                ctx.moveTo(tm.baseX, tm.baseY);
+                ctx.lineTo(tm.tipX, tm.tipY);
+                ctx.strokeStyle = '#6b7280';
+                ctx.lineWidth = 3;
+                ctx.stroke();
+ 
+                // Pilspets
+                ctx.save();
+                ctx.translate(tm.tipX, tm.tipY);
+                ctx.rotate(angle);
+                ctx.beginPath();
+                ctx.moveTo(4, 0);
+                ctx.lineTo(-10, 8);
+                ctx.lineTo(-6, 0);
+                ctx.lineTo(-10, -8);
+                ctx.closePath();
+                ctx.fillStyle = '#4b5563';
+                ctx.fill();
+                ctx.restore();
+ 
+                // Bas (Tydligt, rakt streck som markerar var måttbandet startar)
+                const perpAngle = angle + Math.PI / 2;
+                const markerLength = 10;
+               
+                ctx.beginPath();
+                ctx.moveTo(tm.baseX - Math.cos(perpAngle) * markerLength, tm.baseY - Math.sin(perpAngle) * markerLength);
+                ctx.lineTo(tm.baseX + Math.cos(perpAngle) * markerLength, tm.baseY + Math.sin(perpAngle) * markerLength);
+                ctx.strokeStyle = '#f97316';
+                ctx.lineWidth = 4;
+                ctx.stroke();
+
+                // Liten prick i mitten av strecket som ytterligare visuell hjälp
+                ctx.beginPath();
+                ctx.arc(tm.baseX, tm.baseY, 2.5, 0, Math.PI * 2);
+                ctx.fillStyle = '#c2410c';
+                ctx.fill();
+ 
+                if (dist > 15) {
+                    const midX = tm.baseX + dx / 2;
+                    const midY = tm.baseY + dy / 2;
+                    let textAngle = angle;
+                   
+                    ctx.save();
+                    ctx.translate(midX, midY);
+                    if (textAngle > Math.PI / 2 || textAngle < -Math.PI / 2) {
+                        textAngle += Math.PI;
+                    }
+                    ctx.rotate(textAngle);
+                   
+                    ctx.fillStyle = '#6b7280';
+                    ctx.font = 'bold 15px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'bottom';
+                    const simulatedCm = (dist / 10).toFixed(1);
+                    ctx.fillText(`${simulatedCm} cm`, 0, -6);
+                    ctx.restore();
+                }
+            }
+        }
+ 
+        function drawLayer() {
+            const mat = rectangleMaterials[currentMaterialIndex];
+           
+            ctx.fillStyle = mat.fill;
+            ctx.fillRect(0, horizontalLayer.y, width, horizontalLayer.height);
+           
+            ctx.strokeStyle = mat.stroke;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(0, horizontalLayer.y);
+            ctx.lineTo(width, horizontalLayer.y);
+            ctx.moveTo(0, horizontalLayer.y + horizontalLayer.height);
+            ctx.lineTo(width, horizontalLayer.y + horizontalLayer.height);
+            ctx.stroke();
+           
+            if (mat.n > 1.0) {
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(0, horizontalLayer.y + 2);
+                ctx.lineTo(width, horizontalLayer.y + 2);
+                ctx.stroke();
+            }
+        }
+       
+        function drawScreen() {
+            ctx.fillStyle = '#1f2937';
+            ctx.fillRect(0, screenObj.y, width, screenObj.height);
+           
+            ctx.strokeStyle = '#4b5563';
+            ctx.lineWidth = 6;
+            ctx.strokeRect(0, screenObj.y, width, screenObj.height);
+           
+            ctx.strokeStyle = '#374151';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(0, screenObj.y + 10);
+            ctx.lineTo(width, screenObj.y + 10);
+            ctx.stroke();
+        }
+ 
+        function drawLaserDevice() {
+            ctx.save();
+            ctx.translate(laser.x, laser.y);
+            ctx.rotate(laser.angle);
+ 
+            const l = laser.length;
+            const ht = laser.thickness / 2;
+ 
+            ctx.shadowColor = 'rgba(0,0,0,0.5)';
+            ctx.shadowBlur = 6;
+            ctx.shadowOffsetY = 4;
+ 
+            ctx.fillStyle = '#9ca3af';
+            ctx.fillRect(-l, -ht, 10, laser.thickness);
+ 
+            ctx.fillStyle = '#1f2937';
+            ctx.fillRect(-l + 10, -ht, l - 20, laser.thickness);
+ 
+            ctx.fillStyle = '#d1d5db';
+            ctx.fillRect(-10, -ht, 10, laser.thickness);
+           
+            ctx.fillStyle = '#9ca3af';
+            ctx.fillRect(-4, -ht + 2, 4, laser.thickness - 4);
+ 
+            ctx.fillStyle = '#e5e7eb';
+            ctx.fillRect(-l + 15, -ht - 3, 30, 3);
+           
+            ctx.shadowBlur = 0;
+            ctx.shadowOffsetY = 0;
+            ctx.fillStyle = laser.isOn ? '#ef4444' : '#6b7280';
+            ctx.beginPath();
+            ctx.ellipse(-l / 2, -ht, 6, 2.5, 0, 0, Math.PI * 2);
+            ctx.fill();
+ 
+            ctx.restore();
+        }
+ 
+        function draw() {
+            ctx.clearRect(0, 0, width, height);
+ 
+            drawLayer();
+            drawScreen();
+            drawTapeMeasures();
+ 
+            if (laser.isOn) {
+                const path = calculateRayPath();
+
+                for (const pathSeg of path) {
+                    if (pathSeg.segment && pathSeg.segment.type === 'screen') {
+                       
+                        ctx.shadowColor = laser.color;
+                        ctx.shadowBlur = 40;
+                        ctx.fillStyle = laser.color;
+                        drawStarShape(ctx, pathSeg.end.x, pathSeg.end.y, 5, 25, 10);
+                        ctx.fill();
+                       
+                        ctx.shadowBlur = 20;
+                        ctx.fillStyle = '#ffffff';
+                        drawStarShape(ctx, pathSeg.end.x, pathSeg.end.y, 5, 12, 5);
+                        ctx.fill();
+                       
+                        ctx.shadowBlur = 0;
+                    }
+                }
+            }
+ 
+            drawLaserDevice();
+            requestAnimationFrame(draw);
+        }
+ 
+        draw();
+ 
+    </script>
+</body>
+</html>
